@@ -23,16 +23,6 @@ namespace embedded_vector_detail {
 	template <>
 	struct range_size<void> {};
 
-	constexpr auto range_sizer(ranges::Range&&) noexcept {
-		return range_size<void>{};
-	}
-	ranges::SizedRange{Rng}
-	constexpr range_size<ranges::difference_type_t<ranges::iterator_t<Rng>>>
-	range_sizer(Rng&& rng)
-	noexcept(noexcept(ranges::size(rng)))
-	{
-		return {ranges::distance(rng)};
-	}
 	ranges::Sentinel{S, I}
 	constexpr auto range_sizer(I const&, S const&) noexcept {
 		return range_size<void>{};
@@ -43,6 +33,21 @@ namespace embedded_vector_detail {
 	noexcept(noexcept(last - first))
 	{
 		return {last - first};
+	}
+	constexpr auto range_sizer(ranges::Range&& rng) noexcept {
+		return range_size<void>{};
+	}
+	template <ranges::ForwardRange Rng>
+	requires !ranges::SizedRange<Rng>()
+	constexpr auto range_sizer(ranges::ForwardRange&& rng) noexcept {
+		return range_sizer(ranges::begin(rng), ranges::end(rng));
+	}
+	ranges::SizedRange{Rng}
+	constexpr range_size<ranges::difference_type_t<ranges::iterator_t<Rng>>>
+	range_sizer(Rng&& rng)
+	noexcept(noexcept(ranges::size(rng)))
+	{
+		return {ranges::distance(rng)};
 	}
 
 	template <std::size_t N>

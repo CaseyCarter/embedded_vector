@@ -12,7 +12,23 @@
 
 namespace ranges = std::experimental::ranges;
 
-template <ranges::Destructible, std::size_t> class embedded_vector;
+template <class T>
+concept bool DestructibleObject =
+	std::is_object<T>::value && ranges::Destructible<T>();
+
+template <DestructibleObject T, std::size_t>
+class embedded_vector;
+
+struct default_initialized_t {};
+#ifdef __cpp_inline_variables
+inline constexpr default_initialized_t default_initialized{};
+#else
+template<class>
+constexpr default_initialized_t instance_{};
+namespace {
+	constexpr const default_initialized_t& default_initialized = instance_<void>;
+}
+#endif
 
 namespace embedded_vector_detail {
 	template <class T>
@@ -50,22 +66,31 @@ namespace embedded_vector_detail {
 		return {ranges::distance(rng)};
 	}
 
-	template <std::size_t N>
-	using choose_difference_type =
-		meta::if_c<N <= std::numeric_limits<int>::max(), int,
-		meta::if_c<N <= std::numeric_limits<long>::max(), long, long long>>;
+	template <std::size_t Capacity>
+	using choose_size_type =
+		meta::if_c<Capacity <= std::numeric_limits<unsigned char>::max(), unsigned char,
+		meta::if_c<Capacity <= std::numeric_limits<unsigned short>::max(), unsigned short,
+		meta::if_c<Capacity <= std::numeric_limits<unsigned int>::max(), unsigned int,
+		meta::if_c<Capacity <= std::numeric_limits<unsigned long>::max(), unsigned long,
+		unsigned long long>>>>;
 
-	template <ranges::Destructible T, std::size_t N>
+	template <DestructibleObject T, std::size_t N>
 	class storage {
 	public:
-		using difference_type = choose_difference_type<N>;
-		using size_type = std::make_unsigned_t<difference_type>;
+		using size_type = choose_size_type<N>;
 
 		storage() = default;
-		constexpr storage(size_type n) noexcept
-		: size_{(STL2_EXPECT(n <= N), n)}
+		constexpr storage(size_type n)
+		: size_{n}
 		{
+			STL2_EXPECT(n <= N);
 			ranges::uninitialized_value_construct(data(), n);
+		}
+		constexpr storage(default_initialized_t, size_type n)
+		: size_{n}
+		{
+			STL2_EXPECT(n <= N);
+			ranges::uninitialized_default_construct(data(), n);
 		}
 
 		T* data() noexcept {
@@ -75,7 +100,7 @@ namespace embedded_vector_detail {
 			return reinterpret_cast<T*>(space_ + 0);
 		}
 
-		constexpr size_type size() const {
+		constexpr size_type size() const noexcept {
 			return size_;
 		}
 
@@ -128,22 +153,26 @@ namespace embedded_vector_detail {
 		size_type size_ = 0;
 	};
 
-	template <ranges::Destructible T, std::size_t N>
+	template <DestructibleObject T, std::size_t N>
 	requires std::is_trivial<T>::value && N > 0
 	struct storage<T, N> {
 	public:
-		using difference_type = choose_difference_type<N>;
-		using size_type = std::make_unsigned_t<difference_type>;
+		using size_type = choose_size_type<N>;
 
 		constexpr storage() noexcept = default;
 		constexpr storage(size_type n) noexcept
-		: size_{(STL2_EXPECT(n <= N), n)}
+		: size_{n}
+		{
+			STL2_EXPECT(n <= N);
+		}
+		constexpr storage(default_initialized_t, size_type n) noexcept
+		: storage{n}
 		{}
 
-		T* data() noexcept {
+		constexpr T* data() noexcept {
 			return buffer_ + 0;
 		}
-		T const* data() const noexcept {
+		constexpr T const* data() const noexcept {
 			return buffer_ + 0;
 		}
 
@@ -153,17 +182,17 @@ namespace embedded_vector_detail {
 
 		template<class... Args>
 		requires ranges::Constructible<T, Args...>()
-		auto& emplace_back(Args&&... args)
+		constexpr auto& emplace_back(Args&&... args)
 		noexcept(std::is_nothrow_constructible<T, Args...>::value)
 		{
 			STL2_EXPECT(size_ < N);
 			auto& target = data()[size_];
-			ranges::__construct_at(target, std::forward<Args>(args)...);
+			target = T(std::forward<Args>(args)...); // FIXME: conforming?
 			++size_;
 			return target;
 		}
 
-		void clear() noexcept {
+		constexpr void clear() noexcept {
 			size_ = 0;
 		}
 
@@ -184,16 +213,18 @@ namespace embedded_vector_detail {
 		size_type size_ = 0;
 	};
 
-	template <ranges::Destructible T>
+	template <DestructibleObject T>
 	struct storage<T, 0> {
 	public:
-		using difference_type = choose_difference_type<0>;
-		using size_type = std::make_unsigned_t<difference_type>;
+		using size_type = std::make_unsigned_t<choose_size_type<0>>;
 
 		constexpr storage() noexcept = default;
 		constexpr storage(size_type n) noexcept {
 			STL2_EXPECT(n == 0);
 		}
+		constexpr storage(default_initialized_t, size_type n)
+		: storage{n}
+		{}
 
 		constexpr T* data() noexcept {
 			return nullptr;
@@ -204,15 +235,6 @@ namespace embedded_vector_detail {
 
 		constexpr size_type size() const noexcept {
 			return 0;
-		}
-
-		template<class... Args>
-		requires ranges::Constructible<T, Args...>()
-		auto& emplace_back(Args&&...)
-		noexcept(std::is_nothrow_constructible<T, Args...>::value)
-		{
-			STL2_EXPECT(false);
-			return *static_cast<T*>(nullptr);
 		}
 
 		void clear() noexcept
@@ -268,14 +290,14 @@ namespace embedded_vector_detail {
 	}
 } // namespace embedded_vector_detail
 
-template <ranges::Destructible T, std::size_t N>
+template <DestructibleObject T, std::size_t N>
 class embedded_vector : public embedded_vector_detail::storage<T, N> {
 	using base_t = embedded_vector_detail::storage<T, N>;
 public:
 	using value_type = T;
 	using reference = T&;
 	using const_reference = T const&;
-	using typename base_t::difference_type;
+	using difference_type = std::ptrdiff_t;
 	using typename base_t::size_type;
 	using pointer = T*;
 	using const_pointer = T const*;
@@ -287,7 +309,7 @@ public:
 	// construct/copy/move/destroy:
 	~embedded_vector() = default;
 
-	embedded_vector() = default;
+	constexpr embedded_vector() noexcept = default;
 	constexpr embedded_vector(embedded_vector const& that)
 	noexcept(std::is_nothrow_copy_constructible<value_type>::value)
 	requires ranges::CopyConstructible<value_type>()
@@ -312,6 +334,10 @@ public:
 	requires ranges::CopyConstructible<value_type>()
 	: embedded_vector{
 		ranges::ext::repeat_n_view<value_type>{value, (STL2_EXPECT(n <= N), n)}}
+	{}
+	constexpr embedded_vector(default_initialized_t, size_type n)
+	requires ranges::DefaultConstructible<value_type>()
+	: base_t{default_initialized, (STL2_EXPECT(n <= N), n)}
 	{}
 	template <ranges::InputIterator I, ranges::Sentinel<I> S>
 	requires ranges::Constructible<value_type, ranges::reference_t<I>>()
@@ -403,9 +429,9 @@ public:
 	constexpr reverse_iterator       rend()          noexcept { return {begin()}; }
 	constexpr const_reverse_iterator rend()    const noexcept { return {begin()}; }
 
-	constexpr const_iterator         cbegin()        noexcept { return begin(); }
+	constexpr const_iterator         cbegin()  const noexcept { return begin(); }
 	constexpr const_iterator         cend()    const noexcept { return end(); }
-	constexpr const_reverse_iterator crbegin()       noexcept { return rbegin(); }
+	constexpr const_reverse_iterator crbegin() const noexcept { return rbegin(); }
 	constexpr const_reverse_iterator crend()   const noexcept { return rend(); }
 
 	// size/capacity:
@@ -424,6 +450,11 @@ public:
 	constexpr void resize(size_type sz, const value_type& c) {
 		resize_(sz, [&c](pointer end, pointer new_end) {
 			ranges::uninitialized_fill(end, new_end, c);
+		});
+	}
+	constexpr void resize(default_initialized_t, size_type sz) {
+		resize_(sz, [](pointer end, pointer new_end) {
+			ranges::uninitialized_default_construct(end, new_end);
 		});
 	}
 	constexpr bool empty() const noexcept {
@@ -539,7 +570,6 @@ private:
 	constexpr embedded_vector(embedded_vector_detail::range_size<void>, I first, S last)
 	{
 		for (; first != last; ++first) {
-			STL2_EXPECT(size() < N);
 			emplace_back(*first);
 		}
 	}
@@ -549,10 +579,11 @@ private:
 	{
 		STL2_EXPECT(sz.size_ <= N);
 		for (; first != last; ++first) {
+			// This should be unchecked
 			emplace_back(*first);
 		}
 	}
-	template <ranges::Callable<pointer, pointer> F>
+	template <ranges::Invocable<pointer, pointer> F>
 	constexpr void resize_(size_type sz, F&& f) {
 		STL2_EXPECT(sz <= N);
 		auto end = data() + size();
